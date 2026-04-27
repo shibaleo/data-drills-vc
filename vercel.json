@@ -3,7 +3,7 @@
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
   "functions": {
-    "api/index.ts": {
+    "api/*.ts": {
       "includeFiles": "assets/fonts/**"
     }
   }
