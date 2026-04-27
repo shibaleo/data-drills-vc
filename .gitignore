@@ -8,6 +8,9 @@ api/_bundle.mjs
 # Vercel
 .vercel/
 
+# Claude Code
+.claude/
+
 # env
 .env
 .env.*
