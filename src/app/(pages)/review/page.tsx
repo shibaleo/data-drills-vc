@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { Download, Filter, Loader2, RotateCcw, Save, SlidersHorizontal } from "lucide-react";
+import { ResizableTableShell } from "@/components/resizable-table-shell";
 import {
   useReactTable,
   getCoreRowModel,
@@ -14,13 +15,14 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { rpc } from "@/lib/rpc-client";
 import { useProject } from "@/hooks/use-project";
+import { useFilterPrefs, useSaveFilterPrefs } from "@/hooks/queries/use-filter-prefs";
 import { usePageTitle } from "@/lib/page-context";
 import { OpaqueTag } from "@/components/problem-card";
 import { useProblemDialogs } from "@/hooks/use-problem-dialogs";
-import { useScheduleList, scheduleKeys } from "@/hooks/queries/use-schedule";
+import { useReviewList, reviewKeys } from "@/hooks/queries/use-review";
 import { useProblemsList, problemsKeys } from "@/hooks/queries/use-problems";
 import { useUpdateStatus } from "@/hooks/queries/use-statuses";
-import { SortHeader } from "@/app/(pages)/problems/columns";
+import { SortHeader } from "@/components/sort-header";
 import { toJSTDateString } from "@/lib/date-utils";
 import { StatusTag } from "@/components/color-tags";
 import { Button } from "@/components/ui/button";
@@ -38,12 +40,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { ScheduleRow as ScheduleApiRow } from "@/hooks/queries/use-schedule";
+import type { ReviewRow as ReviewApiRow } from "@/hooks/queries/use-review";
 
 /* ── Row types ── */
 
 /** Display row — adds reviewCount for the "next 4 weeks" forecast cell. */
-interface ScheduleRow extends Omit<ScheduleApiRow, "answerCount"> {
+interface ScheduleRow extends Omit<ReviewApiRow, "answerCount"> {
   reviewCount: number;
   standardTime: number | null;
 }
@@ -167,9 +169,9 @@ function ScheduleChart({
             x2={todayIdx * STEP + CELL / 2}
             y2={chartHeight - BOTTOM_AXIS_H}
             stroke="hsl(var(--foreground))"
-            strokeWidth={1}
-            strokeDasharray="3 3"
-            opacity={0.3}
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            opacity={0.7}
           />
         )}
         {dates.map((date, colIdx) => {
@@ -187,7 +189,7 @@ function ScheduleChart({
                   width={CELL + 2}
                   height={maxStack * STEP}
                   fill="hsl(var(--foreground))"
-                  opacity={0.06}
+                  opacity={0.1}
                 />
               )}
               {/* Empty background blocks */}
@@ -245,11 +247,10 @@ function ScheduleChart({
                   </g>
                 );
               })}
-              {/* Top axis: relative days (every 7 days from today, plus today itself) */}
+              {/* Top axis: absolute dates */}
               {(() => {
                 const diff = todayIdx >= 0 ? colIdx - todayIdx : 0;
                 if (diff % 7 !== 0) return null;
-                const label = diff === 0 ? "今日" : diff > 0 ? `+${diff}` : `▲ ${Math.abs(diff)}`;
                 return (
                   <text
                     x={x + CELL / 2}
@@ -259,14 +260,15 @@ function ScheduleChart({
                     fontSize={9}
                     fontWeight={isToday ? 700 : 400}
                   >
-                    {label}
+                    {`${new Date(date + "T12:00:00").getMonth() + 1} / ${new Date(date + "T12:00:00").getDate()}`}
                   </text>
                 );
               })()}
-              {/* Bottom axis: absolute dates (same cadence) */}
+              {/* Bottom axis: relative days */}
               {(() => {
                 const diff = todayIdx >= 0 ? colIdx - todayIdx : 0;
                 if (diff % 7 !== 0) return null;
+                const label = diff === 0 ? "今日" : diff > 0 ? `+${diff}` : `▲ ${Math.abs(diff)}`;
                 return (
                   <text
                     x={x + CELL / 2}
@@ -276,7 +278,7 @@ function ScheduleChart({
                     fontSize={9}
                     fontWeight={isToday ? 700 : 400}
                   >
-                    {`${new Date(date + "T12:00:00").getMonth() + 1} / ${new Date(date + "T12:00:00").getDate()}`}
+                    {label}
                   </text>
                 );
               })()}
@@ -333,10 +335,28 @@ function StabilitySlider({
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
   };
 
+  // 軸目盛 (max を 6 等分前後で切りのいい間隔に。30 日刻みで概ね収まる想定)
+  const tickStep = max <= 30 ? 5 : max <= 90 ? 15 : max <= 200 ? 30 : 60;
+  const ticks: number[] = [];
+  for (let v = 0; v <= max; v += tickStep) ticks.push(v);
+
   return (
     <div ref={trackRef} className="relative h-14 select-none touch-none">
       {/* Track line */}
       <div className="absolute top-1/2 left-0 right-0 h-0.5 -translate-y-1/2 bg-border rounded" />
+      {/* Axis ticks */}
+      {ticks.map((v) => {
+        const pct = (v / max) * 100;
+        return (
+          <div key={`tick-${v}`} className="absolute top-1/2 -translate-y-1/2 pointer-events-none"
+            style={{ left: `${pct}%` }}>
+            <div className="w-px h-2 -mt-1 mx-auto bg-muted-foreground/40" />
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 text-[8px] text-muted-foreground/60 tabular-nums whitespace-nowrap">
+              {v}d
+            </div>
+          </div>
+        );
+      })}
       {/* Thumbs */}
       {statuses.map((s) => {
         const v = overrides.get(s.name) ?? s.stabilityDays;
@@ -543,7 +563,7 @@ export default function SchedulePage() {
   const qc = useQueryClient();
 
   // Fast path: /schedule API (driven by TanStack Query)
-  const scheduleQuery = useScheduleList(currentProject?.id);
+  const scheduleQuery = useReviewList(currentProject?.id);
   const serverRows = useMemo<ScheduleRow[]>(() => {
     return (scheduleQuery.data ?? []).map((r) => ({
       problemId: r.problemId,
@@ -623,6 +643,33 @@ export default function SchedulePage() {
   const [filterSubjects, setFilterSubjects] = useState<Set<string>>(new Set());
   const [filterLevels, setFilterLevels] = useState<Set<string>>(new Set());
   const [filterStatuses, setFilterStatuses] = useState<Set<string>>(new Set());
+  // DB 永続化
+  const filterPrefsQuery = useFilterPrefs(currentProject?.id);
+  const saveFilterPrefs = useSaveFilterPrefs(currentProject?.id);
+  const prefsLoadedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!currentProject || prefsLoadedRef.current === currentProject.id) return;
+    const data = filterPrefsQuery.data?.review;
+    if (data) {
+      setFilterSubjects(new Set(data.subjectIds ?? []));
+      setFilterLevels(new Set(data.levelIds ?? []));
+      setFilterStatuses(new Set(data.statuses ?? []));
+    }
+    prefsLoadedRef.current = currentProject.id;
+  }, [filterPrefsQuery.data, currentProject]);
+  // 変更時に save (debounce 不要、変化が低頻度)
+  useEffect(() => {
+    if (!currentProject || prefsLoadedRef.current !== currentProject.id) return;
+    saveFilterPrefs.mutate({
+      ...(filterPrefsQuery.data ?? {}),
+      review: {
+        subjectIds: [...filterSubjects],
+        levelIds: [...filterLevels],
+        statuses: [...filterStatuses],
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterSubjects, filterLevels, filterStatuses]);
 
   const now = useMemo(() => new Date(), []);
   const todayStr = useMemo(() => toJSTDateString(now), [now]);
@@ -663,7 +710,7 @@ export default function SchedulePage() {
 
   const handleDataChanged = useCallback(() => {
     if (!currentProject) return;
-    qc.invalidateQueries({ queryKey: scheduleKeys.list(currentProject.id) });
+    qc.invalidateQueries({ queryKey: reviewKeys.list(currentProject.id) });
     qc.invalidateQueries({ queryKey: problemsKeys.list(currentProject.id) });
   }, [qc, currentProject]);
 
@@ -676,6 +723,7 @@ export default function SchedulePage() {
 
   const baseFilteredRows = useMemo(() => {
     return rows.filter((r) => {
+      if (r.reviewCount === 0) return false;  // 未回答問題はテーブル/チャート両方から除外
       if (filterSubjects.size > 0 && (!r.subjectId || !filterSubjects.has(r.subjectId))) return false;
       if (filterLevels.size > 0 && (!r.levelId || !filterLevels.has(r.levelId))) return false;
       if (filterStatuses.size > 0 && !filterStatuses.has(r.lastStatus)) return false;
@@ -1008,11 +1056,7 @@ export default function SchedulePage() {
           </div>
 
           {/* Table */}
-          <div
-            ref={tableRef}
-            className="rounded-md border overflow-auto resize-y"
-            style={{ height: "calc(10 * 2.25rem)", minHeight: "6rem", maxHeight: "80vh" }}
-          >
+          <ResizableTableShell ref={tableRef}>
             <Table className="table-fixed">
               <TableHeader>
                 {table.getHeaderGroups().map((hg) => (
@@ -1077,7 +1121,7 @@ export default function SchedulePage() {
                 })}
               </TableBody>
             </Table>
-          </div>
+          </ResizableTableShell>
         </>
       )}
 

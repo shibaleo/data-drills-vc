@@ -8,6 +8,8 @@ import {
   jsonb,
   primaryKey,
   uniqueIndex,
+  index,
+  date,
 } from "drizzle-orm/pg-core";
 
 // =============================================================================
@@ -248,44 +250,7 @@ export const flashcardReview = pgTable("flashcard_review", {
 });
 
 // =============================================================================
-// 16. Note
-// =============================================================================
-
-export const note = pgTable("note", {
-  id: id(),
-  projectId: uuid("project_id").notNull().references(() => project.id, { onDelete: "cascade" }),
-  topicId: uuid("topic_id").references(() => topic.id, { onDelete: "set null" }),
-  title: text("title").notNull(),
-  content: text("content").notNull().default(""),
-  pinned: boolean("pinned").notNull().default(false),
-  sortOrder: integer("sort_order").notNull().default(0),
-  ...timestamps(),
-});
-
-// =============================================================================
-// 17. NoteTag (M:N)
-// =============================================================================
-
-export const noteTag = pgTable("note_tag", {
-  noteId: uuid("note_id").notNull().references(() => note.id, { onDelete: "cascade" }),
-  tagId: uuid("tag_id").notNull().references(() => tag.id, { onDelete: "cascade" }),
-}, (t) => [
-  primaryKey({ columns: [t.noteId, t.tagId] }),
-]);
-
-// =============================================================================
-// 18. NoteProblem (M:N)
-// =============================================================================
-
-export const noteProblem = pgTable("note_problem", {
-  noteId: uuid("note_id").notNull().references(() => note.id, { onDelete: "cascade" }),
-  problemId: uuid("problem_id").notNull().references(() => problem.id, { onDelete: "cascade" }),
-}, (t) => [
-  primaryKey({ columns: [t.noteId, t.problemId] }),
-]);
-
-// =============================================================================
-// 19. User
+// 16. User
 // =============================================================================
 
 export const user = pgTable("user", {
@@ -347,4 +312,91 @@ export const filterPref = pgTable("filter_pref", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   uniqueIndex("filter_pref_project_key").on(t.projectId),
+]);
+
+// =============================================================================
+// 24. Backlog (bitemporal append-only)
+//
+// 新規問題配分の戦略エンティティ。(id, revision) PK。
+// 編集時は revision+1 を INSERT し、旧 revision の valid_to に NOW() を塗る。
+// archive は is_active=false の新 revision を INSERT。
+// メンバー問題は filter から導出する。
+// =============================================================================
+
+export type BacklogFilter = {
+  subjectIds?: string[];
+  levelIds?: string[];
+  topicIds?: string[];
+  tagIds?: string[];
+};
+
+export const backlog = pgTable("backlog", {
+  id: uuid("id").notNull(),
+  revision: integer("revision").notNull(),
+  projectId: uuid("project_id").notNull().references(() => project.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  dailyMinutes: integer("daily_minutes").notNull(),
+  timeMultiplierPct: integer("time_multiplier_pct").notNull().default(100),
+  weekdayWeights: jsonb("weekday_weights").$type<number[]>().notNull().default([1, 1, 1, 1, 1, 1, 1]),
+  filter: jsonb("filter").$type<BacklogFilter>().notNull().default({}),
+  isActive: boolean("is_active").notNull().default(true),
+  validFrom: timestamp("valid_from", { withTimezone: true }).notNull().defaultNow(),
+  validTo: timestamp("valid_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.id, t.revision] }),
+  index("backlog_current_idx").on(t.id, t.revision.desc()),
+  index("backlog_project_active_idx").on(t.projectId, t.isActive, t.validTo),
+]);
+
+// =============================================================================
+// 25. GoalLayer (bitemporal append-only)
+// =============================================================================
+
+export const goalLayer = pgTable("goal_layer", {
+  id: uuid("id").notNull(),
+  revision: integer("revision").notNull(),
+  backlogId: uuid("backlog_id").notNull(),
+  name: text("name").notNull().default(""),
+  color: text("color"),
+  opacityPct: integer("opacity_pct"),
+  lineStyle: text("line_style"),
+  lineWidth: integer("line_width"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  validFrom: timestamp("valid_from", { withTimezone: true }).notNull().defaultNow(),
+  validTo: timestamp("valid_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.id, t.revision] }),
+  index("goal_layer_current_idx").on(t.id, t.revision.desc()),
+  index("goal_layer_backlog_idx").on(t.backlogId, t.isActive, t.validTo),
+]);
+
+// =============================================================================
+// 26. GoalMilestone (bitemporal append-only) + BacklogViewPref
+// =============================================================================
+
+export const backlogViewPref = pgTable("backlog_view_pref", {
+  backlogId: uuid("backlog_id").primaryKey(),
+  filter: jsonb("filter").$type<Record<string, unknown>>().notNull().default({}),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const goalMilestone = pgTable("goal_milestone", {
+  id: uuid("id").notNull(),
+  revision: integer("revision").notNull(),
+  backlogId: uuid("backlog_id").notNull(),
+  layerId: uuid("layer_id").notNull(),
+  target: integer("target").notNull(),
+  date: date("date").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  validFrom: timestamp("valid_from", { withTimezone: true }).notNull().defaultNow(),
+  validTo: timestamp("valid_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.id, t.revision] }),
+  index("goal_milestone_current_idx").on(t.id, t.revision.desc()),
+  index("goal_milestone_backlog_idx").on(t.backlogId, t.isActive, t.validTo),
+  index("goal_milestone_layer_idx").on(t.layerId),
 ]);
