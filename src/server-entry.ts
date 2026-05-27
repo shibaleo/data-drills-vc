@@ -62,7 +62,7 @@ export default async function handler(
     const request = new Request(url.toString(), {
       method: reqMethod,
       headers,
-      ...(body ? { body } : {}),
+      ...(body ? { body: body as BodyInit } : {}),
     });
 
     const response = await app.fetch(request);
