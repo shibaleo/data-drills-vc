@@ -1,55 +1,68 @@
-/**
- * DB client for Vercel Functions (Node.js runtime).
- *
- * Vercel Functions run in long-lived Node processes (one per warm container)
- * so a module-scoped postgres client is reused across invocations. Each
- * invocation is short, the pool size is small, and Supabase's pooler handles
- * multiplexing — no AsyncLocalStorage indirection needed.
- *
- * DATABASE_URL is expected to be the Supabase pooler URL (transaction mode);
- * `prepare: false` keeps pgbouncer happy.
- */
 import postgres from "postgres";
-import { drizzle } from "drizzle-orm/postgres-js";
+import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as schema from "./schema";
+import { env } from "@/lib/env";
 
-const globalForDb = globalThis as unknown as {
-  _pgClient?: ReturnType<typeof postgres>;
-};
+type DB = PostgresJsDatabase<typeof schema>;
 
-console.log("[boot] db: module load", {
-  hasDbUrl: !!process.env.DATABASE_URL,
-  cached: !!globalForDb._pgClient,
-});
+interface RequestStore {
+  client: ReturnType<typeof postgres> | null;
+  db: DB | null;
+}
 
-const client =
-  globalForDb._pgClient ??
-  (() => {
-    const t0 = Date.now();
-    const url = process.env.DATABASE_URL;
-    if (!url) {
-      console.error("[boot] db: DATABASE_URL is missing!");
-    } else {
-      // Surface only the pooler host so logs aren't sensitive.
-      const safeHost = url.replace(/^postgresql:\/\/[^@]*@/, "postgresql://***@");
-      console.log("[boot] db: creating new postgres client", { url: safeHost });
+// Per-request DB client storage (CF Workers cannot share I/O across requests)
+const als = new AsyncLocalStorage<RequestStore>();
+
+/** Wrap a request handler — creates a per-request DB client and closes it when done */
+export async function withRequestDb<T>(fn: () => T | Promise<T>): Promise<T> {
+  const store: RequestStore = { client: null, db: null };
+  try {
+    return await als.run(store, fn);
+  } finally {
+    // Return connection to Hyperdrive pool
+    if (store.client) {
+      store.client.end({ timeout: 0 }).catch(() => {});
     }
-    const c = postgres(url!, {
+  }
+}
+
+// Fallback for local dev (long-lived process, shared client is fine)
+let _fallbackDb: DB | null = null;
+
+function getOrCreateDb(): DB {
+  const store = als.getStore();
+
+  if (store) {
+    // CF Workers: per-request client
+    if (!store.db) {
+      store.client = postgres(env.DATABASE_URL, {
+        max: 1,
+        idle_timeout: 20,
+        connect_timeout: 10,
+        ssl: false, // Hyperdrive handles SSL
+      });
+      store.db = drizzle(store.client, { schema });
+    }
+    return store.db;
+  }
+
+  // Local dev: cached client
+  if (!_fallbackDb) {
+    const client = postgres(env.DATABASE_URL, {
       max: 1,
       idle_timeout: 20,
       connect_timeout: 10,
-      prepare: false,
       ssl: "require",
-      onnotice: (n) => console.log("[db] notice:", n),
     });
-    console.log("[boot] db: postgres() returned in", Date.now() - t0, "ms");
-    return c;
-  })();
-
-if (process.env.NODE_ENV !== "production") {
-  globalForDb._pgClient = client;
+    _fallbackDb = drizzle(client, { schema });
+  }
+  return _fallbackDb;
 }
-// On Vercel, also cache on globalThis so warm invocations skip re-creation.
-globalForDb._pgClient = client;
 
-export const db = drizzle(client, { schema });
+// Lazy proxy: defers DB creation until first use
+export const db: DB = new Proxy({} as DB, {
+  get(_, prop) {
+    return (getOrCreateDb() as any)[prop];
+  },
+});
