@@ -13,6 +13,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { AllocatedProblem, Milestone } from "@/lib/backlog-allocate";
+import { blockColor, blockBorder } from "@/lib/block-color";
 
 export type BacklogChartHandle = {
   getCenterDate(): string;
@@ -74,9 +75,6 @@ const CELL = 14;
 const GAP = 2;
 const STEP = CELL + GAP;
 
-const COLOR_PAST = "#22c55e";
-const COLOR_FUTURE = "#3b82f6";
-const COLOR_OVERFLOW = "#ef4444";
 const MS_COLOR = "#f59e0b";
 
 function addDays(dateStr: string, days: number): string {
@@ -312,13 +310,19 @@ export const BacklogChart = forwardRef<BacklogChartHandle, BacklogChartProps>(fu
                     fill="none" stroke="hsl(var(--border))" strokeWidth={0.5}/>
                 ))}
                 {dayItems.map((item, stackIdx) => {
-                  const baseColor = item.overflow ? COLOR_OVERFLOW : item.side === "past" ? COLOR_PAST : COLOR_FUTURE;
-                  // overBudget は塗りを yellow に変える (past / overflow 優先)
-                  const color = (!item.overflow && item.side === "future" && item.overBudget) ? "#eab308" : baseColor;
+                  const kind = item.side === "past"
+                    ? { side: "past" as const, prevStatusColor: null }
+                    : { side: "future" as const, overflow: item.overflow, overBudget: item.overBudget };
+                  const color = blockColor(kind);
+                  const warn = blockBorder(kind);
                   const isSelected = item.problemId === selectedId;
                   const anchor = visibleAnchors.find((a) => a.problemId === item.problemId);
                   const anchorColor = anchor?.layer_id ? (layers.find((l) => l.id === anchor.layer_id)?.color || MS_COLOR) : MS_COLOR;
                   const by = chartHeight - BOTTOM_AXIS_H - (stackIdx + 1) * STEP;
+                  // anchor (milestone tie) > warn border > selection highlight, all stroked on the same rect.
+                  const stroke = anchor ? anchorColor : warn?.stroke ?? "none";
+                  const strokeWidth = anchor ? 2 : warn?.width ?? 0;
+                  const strokeDasharray = !anchor && warn?.dashed ? "2 2" : undefined;
                   return (
                     <g key={`${item.problemId}-${stackIdx}`}>
                       {isSelected && (
@@ -327,15 +331,14 @@ export const BacklogChart = forwardRef<BacklogChartHandle, BacklogChartProps>(fu
                       )}
                       <rect x={x} y={by} width={CELL} height={CELL} rx={2}
                         fill={color} opacity={isSelected ? 1 : 0.85}
-                        stroke={anchor ? anchorColor : "none"}
-                        strokeWidth={anchor ? 2 : 0}
+                        stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray}
                         className="cursor-pointer"
                         onClick={() => (isSelected ? onOpen?.(item.problemId) : onSelect?.(item.problemId))}
                         onDoubleClick={() => onOpen?.(item.problemId)}>
                         <title>
                           {anchor ? `[#${anchor.target}] ` : ""}
                           {item.code} {item.name ?? ""} ({Math.round(item.standardTimeSec / 60)} min)
-                          {item.overBudget ? " ⚠ Over daily budget" : ""}
+                          {item.overflow ? " ⚠ Overflow (past milestone)" : item.overBudget ? " ⚠ Over daily budget" : ""}
                         </title>
                       </rect>
                     </g>
