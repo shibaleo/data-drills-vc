@@ -8,7 +8,7 @@ export type { ProblemWithAnswers, AnswerWithReviews }
 import { parseDuration, fmtDiff, secondsToHms } from '@/lib/duration'
 import { toJSTDate, jstDayDiff, todayJST } from '@/lib/date-utils'
 import { computeForgettingInfo } from '@/lib/forgetting-curve'
-import { computeNextReview } from '@/lib/fsrs'
+import { computeNextReview } from '@/lib/review-scoring'
 import { useLookup } from '@/hooks/use-project'
 import { Markdown } from '@/components/markdown'
 import { DurationSparkline } from '@/components/duration-sparkline'
@@ -159,7 +159,7 @@ export function ProblemCard({
             <Pencil className="size-3" />
           </button>
           {p.standard_time != null && (
-            <span className="text-[10px] font-mono text-foreground/50">{secondsToHms(p.standard_time)}</span>
+            <span className="ml-auto text-[10px] font-mono tabular-nums text-primary">{secondsToHms(p.standard_time)}</span>
           )}
         </div>
 
