@@ -59,6 +59,8 @@ function getOrCreateDb(): DB {
       max_lifetime: 60,        // 60 秒で接続強制リサイクル
       connect_timeout: 10,
       ssl: "require",
+      prepare: false,
+      fetch_types: false,
     });
     globalForPg.__pgFallbackDb = drizzle(globalForPg.__pgFallbackClient, { schema });
   }
