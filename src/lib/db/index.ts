@@ -54,7 +54,7 @@ function getOrCreateDb(): DB {
   // Local dev: globalThis-cached client (HMR-safe)
   if (!globalForPg.__pgFallbackDb) {
     globalForPg.__pgFallbackClient = postgres(env.DATABASE_URL, {
-      max: 3,                  // 同時 query は最大 3 (= Supabase 15 上限から余裕を持つ)
+      max: 5,                  // 並列 fanout (problems-list 等) に余裕を持たせる
       idle_timeout: 5,         // 5 秒 idle で接続クローズ
       max_lifetime: 60,        // 60 秒で接続強制リサイクル
       connect_timeout: 10,
