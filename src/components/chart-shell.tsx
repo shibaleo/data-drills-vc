@@ -15,7 +15,7 @@
  * Geometry constants (cell size, step, axes heights) follow `chart-constants.ts`.
  * For BacklogChart and the like with rich overlays, just pass complex children.
  */
-import { useEffect, useImperativeHandle, useRef, forwardRef } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
 import { CELL, STEP, Y_AXIS_W } from "@/lib/chart-constants";
 
 export const DEFAULT_TOP_AXIS_H = 16;
@@ -69,6 +69,7 @@ export const ChartShell = forwardRef<ChartShellHandle, ChartShellProps>(function
   const scrollRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const didInitScrollRef = useRef(false);
+  const [ready, setReady] = useState(false);
 
   const cursorIdx = dates.indexOf(cursorDate);
   const chartWidth = dates.length * STEP;
@@ -92,35 +93,54 @@ export const ChartShell = forwardRef<ChartShellHandle, ChartShellProps>(function
     },
   }), [dates, cursorDate]);
 
-  // 初回 mount (= ページ遷移直後) のみ、cursor を 1/3 位置にスクロール。
-  // データロード完了を待つため dates.length が初期 padding (= 22) を超えてから init。
-  // 以降は scrollLeft を触らない (= ユーザーの scroll 操作を尊重)。
+  // 初回 mount で cursor を 1/3 位置に scroll。以降はユーザー scroll を尊重して触らないが、
+  // データ遅延ロードで dates が大きく拡張され cursor が viewport 外に出た場合は再スクロールする。
   //
   // 注意: 複数 effect 起動で rAF が並走すると stale な cursorIdx で繰り返し scroll
   //       するため、cleanup で前回の rAF をキャンセルする。
   useEffect(() => {
-    if (!scrollRef.current || cursorIdx < 0 || didInitScrollRef.current) return;
+    if (!scrollRef.current || cursorIdx < 0) return;
     if (isDraggingRef.current) return;
-    if (dates.length <= 22) return;
     let cancelled = false;
     const tryScroll = () => {
-      if (cancelled || didInitScrollRef.current) return;
+      if (cancelled) return;
       const el = scrollRef.current;
       if (!el) return;
       if (el.clientWidth === 0) {
         requestAnimationFrame(tryScroll);
         return;
       }
-      didInitScrollRef.current = true;
-      const cursorX = cursorIdx * STEP;
-      el.scrollLeft = Math.max(0, cursorX - el.clientWidth / 3);
+      const cursorX = cursorIdx * STEP + CELL / 2;
+      const inView = cursorX >= el.scrollLeft && cursorX <= el.scrollLeft + el.clientWidth;
+      // 初回: dates が確定 (>22) してから 1/3 位置にセット。
+      // dates が小さい (= 空 state) なら scroll 不要だが ready は立てて chart を表示する。
+      if (!didInitScrollRef.current) {
+        if (dates.length <= 22) {
+          setReady(true);
+          return;
+        }
+        didInitScrollRef.current = true;
+        el.scrollLeft = Math.max(0, cursorX - el.clientWidth / 3);
+        setReady(true);
+        return;
+      }
+      // 既に init 済 + cursor が viewport 外 → 1/3 位置に呼び戻す (= データ拡張で cursor が外れた場合)
+      if (!inView) {
+        el.scrollLeft = Math.max(0, cursorX - el.clientWidth / 3);
+      }
     };
     requestAnimationFrame(tryScroll);
     return () => { cancelled = true; };
   }, [cursorIdx, dates.length]);
 
   return (
-    <div className="flex">
+    <div className="flex relative" style={{ visibility: ready ? "visible" : "hidden" }}>
+      {!ready && (
+        <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm"
+          style={{ visibility: "visible" }}>
+          Loading…
+        </div>
+      )}
       {/* left: Y axis ticks OR custom HTML slot */}
       {leftSlot ? leftSlot : (
         yAxisLabels && yAxisLabels.length > 0 && (
