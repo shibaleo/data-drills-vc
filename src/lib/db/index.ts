@@ -45,6 +45,7 @@ function getOrCreateDb(): DB {
         idle_timeout: 20,
         connect_timeout: 10,
         ssl: false, // Hyperdrive handles SSL
+        connection: { search_path: "data_drills,public" },
       });
       store.db = drizzle(store.client, { schema });
     }
@@ -61,6 +62,7 @@ function getOrCreateDb(): DB {
       ssl: "require",
       prepare: false,
       fetch_types: false,
+      connection: { search_path: "data_drills,public" },
     });
     globalForPg.__pgFallbackDb = drizzle(globalForPg.__pgFallbackClient, { schema });
   }
