@@ -55,8 +55,8 @@ function getOrCreateDb(): DB {
   if (!globalForPg.__pgFallbackDb) {
     globalForPg.__pgFallbackClient = postgres(env.DATABASE_URL, {
       max: 5,                  // 並列 fanout (problems-list 等) に余裕を持たせる
-      idle_timeout: 5,         // 5 秒 idle で接続クローズ
-      max_lifetime: 60,        // 60 秒で接続強制リサイクル
+      idle_timeout: 30,        // serverless warm 維持。短すぎると接続churnで間欠 500
+      max_lifetime: 600,       // 10 分でリサイクル
       connect_timeout: 10,
       ssl: "require",
       prepare: false,
