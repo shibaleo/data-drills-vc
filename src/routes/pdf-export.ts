@@ -1,80 +1,134 @@
 /**
- * PDF Export — proxy to the external PDF service for read-only combined
- * PDF generation (no scan / no write-back). Scan & apply workflows are
- * intentionally not exposed here; run those as an external pipeline that
- * writes to data-drills via the standard problems/problem_files API.
+ * PDF Export — in-process implementation (no proxy).
+ *
+ * vc は Vercel Functions 上で pdf-lib + fontkit を直接動かして PDF を結合する。
+ * cf 版は Hyperdrive の制約で重い処理を Worker で回せないので Render の
+ * services/pdf へ proxy するが、vc は Node 18 server full なので不要。
  */
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { env } from "@/lib/env";
+import { db } from "@/lib/db";
+import { problem, problemFile, oauthToken, subject, level } from "@/lib/db/schema";
+import { and, eq, inArray } from "drizzle-orm";
+import { getValidAccessToken } from "@/lib/google-oauth";
+import { downloadDriveFile } from "@/lib/drive-helpers";
+import { extractAndLabel, mergePdfs } from "@/lib/pdf-processing";
+import { getAuth } from "@/lib/ownership";
+import { ownsProject } from "@/lib/ownership";
+import type { AuthResult } from "@/lib/auth";
 
 export const pdfExportInputSchema = z.object({
-  // 100 件上限。Worker メモリ + Render free plan の処理時間を考慮。
   problem_ids: z.array(z.string().uuid()).min(1).max(100),
 });
 
-const app = new Hono()
+type Env = { Variables: { authResult: AuthResult } };
+
+/** concurrency-limited map (Drive API rate limit / Vercel メモリ保護) */
+async function pMap<T, R>(
+  items: T[],
+  fn: (item: T, index: number) => Promise<R>,
+  concurrency: number,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+const app = new Hono<Env>()
   /**
-   * GET /health — proxy to the PDF service's /health endpoint.
-   *
-   * On Render's free plan, the service sleeps after inactivity. Hitting
-   * /health from CF triggers wake-up; the request hangs until Render is
-   * ready (typically 30-60s) and then returns 200. The client uses this
-   * to distinguish the "起床中" phase from "PDF 処理中".
+   * GET /health — in-process なので常に OK。
+   * cf 版との client API 互換のため endpoint だけ残す。
    */
-  .get("/health", async (c) => {
-    const pdfApiUrl = env.PDF_API_URL;
-    if (!pdfApiUrl) {
-      return c.json({ error: "PDF_API_URL is not configured" }, 500);
-    }
-    const res = await fetch(`${pdfApiUrl}/health`);
-    if (!res.ok) {
-      return c.json({ error: `PDF service unhealthy (${res.status})` }, 503);
-    }
-    return c.json({ ok: true });
-  })
+  .get("/health", (c) => c.json({ ok: true }))
   .post("/", zValidator("json", pdfExportInputSchema), async (c) => {
-    const pdfApiUrl = env.PDF_API_URL;
-    if (!pdfApiUrl) {
-      return c.json({ error: "PDF_API_URL is not configured" }, 500);
-    }
-    const body = c.req.valid("json");
-    const res = await fetch(`${pdfApiUrl}/api/v1/pdf-sync/export`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-pdf-service-key": env.PDF_SERVICE_KEY,
-      },
-      body: JSON.stringify(body),
+    const userId = getAuth(c).userId;
+    const { problem_ids } = c.req.valid("json");
+
+    // Drive token (= user-scoped、provider=google)
+    const [tokens] = await db
+      .select()
+      .from(oauthToken)
+      .where(and(eq(oauthToken.userId, userId), eq(oauthToken.provider, "google")))
+      .limit(1);
+    if (!tokens) return c.json({ error: "Google Drive not connected" }, 400);
+    const accessToken = await getValidAccessToken({
+      access_token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
+      token_expires_at: tokens.tokenExpiresAt,
     });
 
-    // On error, forward the upstream error body as JSON
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => "");
-      return c.json(
-        { error: errorText || `PDF service returned ${res.status}` },
-        500,
-      );
+    // problems + ownership 同時確認 (JOIN で projectId → owner)
+    const problems = await db
+      .select()
+      .from(problem)
+      .where(inArray(problem.id, problem_ids));
+    if (problems.length === 0) return c.json({ error: "No problems found" }, 404);
+
+    // 全 problem が同じ user のプロジェクト配下か確認
+    const projectIds = [...new Set(problems.map((p) => p.projectId))];
+    for (const pid of projectIds) {
+      if (!(await ownsProject(pid, userId))) {
+        return c.json({ error: "Not authorized" }, 403);
+      }
     }
 
-    // Buffer the entire PDF in CF Worker before responding. Streaming
-    // through with raw upstream headers caused intermittent client-side
-    // failures (idle disconnects during Render cold-start, header/encoding
-    // mismatches across browsers).
-    const buffer = await res.arrayBuffer();
-    const contentType =
-      res.headers.get("content-type") ?? "application/pdf";
-    const contentDisposition =
-      res.headers.get("content-disposition") ??
-      'attachment; filename="exported.pdf"';
+    const files = await db
+      .select()
+      .from(problemFile)
+      .where(inArray(problemFile.problemId, problem_ids));
 
-    return new Response(buffer, {
+    const subjectIds = [...new Set(problems.map((p) => p.subjectId).filter(Boolean))] as string[];
+    const levelIds = [...new Set(problems.map((p) => p.levelId).filter(Boolean))] as string[];
+    const subjectMap = new Map(
+      subjectIds.length
+        ? (await db.select().from(subject).where(inArray(subject.id, subjectIds))).map((s) => [s.id, s.name])
+        : [],
+    );
+    const levelMap = new Map(
+      levelIds.length
+        ? (await db.select().from(level).where(inArray(level.id, levelIds))).map((l) => [l.id, l.name])
+        : [],
+    );
+
+    problems.sort((a, b) => a.code.localeCompare(b.code));
+
+    const work = problems.flatMap((p) => {
+      const pf = files.find((f) => f.problemId === p.id);
+      if (!pf) return [];
+      const pages = (pf.problemPages as number[]) ?? [];
+      if (pages.length === 0) return [];
+      const subName = (p.subjectId && subjectMap.get(p.subjectId)) || "";
+      const lvlName = (p.levelId && levelMap.get(p.levelId)) || "";
+      return [{ pf, label: `${subName}_${lvlName}_${p.code}`, pages }];
+    });
+    if (work.length === 0) {
+      return c.json({ error: "No problem pages found" }, 404);
+    }
+
+    // Drive download + per-file extract+label。並列度は Drive rate limit を考慮。
+    const parts = await pMap(work, async (w) => {
+      const raw = await downloadDriveFile(accessToken, w.pf.gdriveFileId);
+      return extractAndLabel(new Uint8Array(raw), w.pages, w.label);
+    }, 5);
+
+    // mergePdfs は ArrayBuffer[] を取るので Uint8Array → ArrayBuffer に変換
+    const merged = await mergePdfs(
+      parts.map((u) => u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength) as ArrayBuffer),
+    );
+    const today = new Date().toISOString().slice(0, 10);
+    return new Response(Buffer.from(merged), {
       status: 200,
       headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": contentDisposition,
-        "Content-Length": String(buffer.byteLength),
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="exported-${today}.pdf"`,
       },
     });
   });
